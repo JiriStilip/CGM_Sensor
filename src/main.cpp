@@ -52,6 +52,7 @@ SSD1306  display(0x3c, 4, 15);
 #define AUTH_1_STR "3"
 
 #define PIN_LED_R 23
+#define PIN_POT_0 13
 
 
 struct CGMeasurement {
@@ -181,6 +182,9 @@ char *aes128_endecrypt(char *destination, char *sourcetext, bool decrypt) {
   return destination;
 }
 
+int pot_0;
+
+int cgm_interval = CGM_INTERVAL;
 int timeSinceStart = 0;
 int clientLastTime = -1;
 
@@ -283,6 +287,9 @@ void drawScreen(CGMeasurement *measurement, char *message) {
   display.setFont(ArialMT_Plain_10);
   display.drawStringMaxWidth(64, 42, 128, message);
 
+  sprintf(printBuffer, "CGM interval set to: %d s", cgm_interval);
+  display.drawStringMaxWidth(64, 54, 128, printBuffer);
+
   display.display();
 }
 
@@ -293,8 +300,9 @@ void setup() {
   digitalWrite(16, HIGH);
 
   pinMode(PIN_LED_R, OUTPUT);
+  pinMode(PIN_POT_0, INPUT);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println();
 
   display.init();
@@ -355,7 +363,10 @@ void setup() {
 }
 
 void loop() {
-  if (timeSinceStart % CGM_INTERVAL == 0) {
+  pot_0 = analogRead(PIN_POT_0);
+  cgm_interval = map(pot_0, 0, 4095, 1, 10);
+
+  if (timeSinceStart % cgm_interval == 0) {
     String received;
     int time = 0;
     int val = 0;
