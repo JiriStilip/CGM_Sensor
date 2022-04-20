@@ -52,35 +52,9 @@ SSD1306  display(0x3c, 4, 15);
 #define AUTH_1_STR "3"
 
 
-class CGMeasurement {
-  public: 
-    CGMeasurement(int time, float val) : timeOffset(time), glucoseValue(val) {
-
-    }
-
-    char *toMessage() {
-      static char measurementMessage[12];
-
-      sprintf(measurementMessage, "%04d|%6.2f", timeOffset, glucoseValue);
-
-      return measurementMessage;
-    }
-
-    char *toString() {
-      static char measurementString[15];
-
-      sprintf(measurementString, "%02d:%02d | %6.2f", (timeOffset / 60), (timeOffset % 60), glucoseValue);
-
-      return measurementString;
-    }
-
-    int getTimeOffset() {
-      return timeOffset;
-    }
-
-  private: 
-    int timeOffset;
-    float glucoseValue;
+struct CGMeasurement {
+  int32_t timeOffset;
+  float glucoseValue;
 };
 
 float generateValue() {
@@ -244,17 +218,22 @@ class MyServerCallbacks: public BLEServerCallbacks {
 };
 
 bool setValueAfter(int clientLastTime) {
+  char measurementMessage[12];
+
   for (int i = 0; i < buffer.size(); ++i) {
-    if (clientLastTime >= buffer[i]->getTimeOffset()) {
+    if (clientLastTime >= buffer[i]->timeOffset) {
       continue;
     }
-    cgmMeasurementCharacteristic->setValue(buffer[i]->toMessage());
+    sprintf(measurementMessage, "%04d|%6.2f", buffer[i]->timeOffset, buffer[i]->glucoseValue);
+    cgmMeasurementCharacteristic->setValue(measurementMessage);
     return true;
   }
   return false;
 }
 
 void printCurrentState() {
+  char printBuffer[32];
+
   Serial.println();
   Serial.print("Current state: ");
   Serial.println(state);
@@ -278,14 +257,16 @@ void printCurrentState() {
   }
   Serial.println();
   Serial.print("Current CGM value: ");
-  Serial.println(buffer.last()->toMessage());
+  sprintf(printBuffer, "%04d|%6.2f", buffer.last()->timeOffset, buffer.last()->glucoseValue);
+  Serial.println(printBuffer);
   display.clear();
-  display.drawString(64, 22, buffer.last()->toMessage());
+  display.drawString(64, 22, printBuffer);
   display.display();
 
   Serial.println("Buffer (time | mg/dL):");
   for (int i = 0; i < buffer.size(); ++i) {
-    Serial.println(buffer[i]->toString());
+    sprintf(printBuffer, "%02d:%02d | %6.2f", (buffer[i]->timeOffset / 60), (buffer[i]->timeOffset % 60), buffer[i]->glucoseValue);
+    Serial.println(printBuffer);
   }
 }
 
@@ -357,7 +338,9 @@ void setup() {
 
 void loop() {
   if (timeSinceStart % CGM_INTERVAL == 0) {
-    measurement = new CGMeasurement(timeSinceStart, generateValue());
+    measurement = new CGMeasurement();
+    measurement->timeOffset = timeSinceStart;
+    measurement->glucoseValue = generateValue();
     buffer.push(measurement);
   }
 
@@ -385,7 +368,8 @@ void loop() {
         else {
           // stav READ
           sprintf(state, "%s", "READ");
-          cgmMeasurementCharacteristic->setValue(buffer.first()->toMessage());
+          sprintf(message, "%04d|%6.2f", buffer.first()->timeOffset, buffer.first()->glucoseValue);
+          cgmMeasurementCharacteristic->setValue(message);
         }
       }
       else {
