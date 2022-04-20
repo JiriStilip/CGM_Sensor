@@ -294,7 +294,7 @@ void setup() {
 
   pinMode(PIN_LED_R, OUTPUT);
 
-  Serial.begin(115200);
+  Serial.begin(9600);
   Serial.println();
 
   display.init();
@@ -356,9 +356,21 @@ void setup() {
 
 void loop() {
   if (timeSinceStart % CGM_INTERVAL == 0) {
+    String received;
+    int time = 0;
+    int val = 0;
+
+    Serial.println("STEP");
+    received = Serial.readString();
+    sscanf(received.c_str(), "OK;%d", &time);
+
+    Serial.println("GET_IG");
+    received = Serial.readString();
+    sscanf(received.c_str(), "OK;%d", &val);
+
     measurement = new CGMeasurement();
-    measurement->timeOffset = timeSinceStart;
-    measurement->glucoseValue = generateValue();
+    measurement->timeOffset = (time % 86400) / 60;
+    measurement->glucoseValue = val / 100.00;
     buffer.push(measurement);
   }
 
