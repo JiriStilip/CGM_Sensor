@@ -51,6 +51,8 @@ SSD1306  display(0x3c, 4, 15);
 #define AUTH_1 3
 #define AUTH_1_STR "3"
 
+#define PIN_LED_R 23
+
 
 struct CGMeasurement {
   int32_t timeOffset;
@@ -201,19 +203,21 @@ BLECharacteristic *securityActionCharacteristic = new BLECharacteristic(SECURITY
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
-      Serial.println("\nCONNECTED.");
+      // Serial.println("\nCONNECTED.");
+      digitalWrite(PIN_LED_R, HIGH);
       clientConnected = true;
     }
 
     void onDisconnect(BLEServer* pServer) {
-      Serial.println("\nDISCONNECTED.");
+      // Serial.println("\nDISCONNECTED.");
+      digitalWrite(PIN_LED_R, LOW);
       clientConnected = false;
       clientAuthenticated = false;
       cgmTimeCharacteristic->setValue(INVALID_TIME);
       clientLastTime = -1;
       sprintf(state, "%s", "INIT");
       pServer->getAdvertising()->start();
-      Serial.println("Advertising started...");
+      // Serial.println("Advertising started...");
     }
 };
 
@@ -259,9 +263,6 @@ void printCurrentState() {
   Serial.print("Current CGM value: ");
   sprintf(printBuffer, "%04d|%6.2f", buffer.last()->timeOffset, buffer.last()->glucoseValue);
   Serial.println(printBuffer);
-  display.clear();
-  display.drawString(64, 22, printBuffer);
-  display.display();
 
   Serial.println("Buffer (time | mg/dL):");
   for (int i = 0; i < buffer.size(); ++i) {
@@ -270,11 +271,28 @@ void printCurrentState() {
   }
 }
 
+void drawScreen(CGMeasurement *measurement, char *message) {
+  char printBuffer[128];
+
+  sprintf(printBuffer, "%04d|%6.2f", measurement->timeOffset, measurement->glucoseValue);
+
+  display.clear();
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(64, 8, printBuffer);
+  display.drawHorizontalLine(0, 40, 128);
+  display.setFont(ArialMT_Plain_10);
+  display.drawStringMaxWidth(64, 42, 128, message);
+
+  display.display();
+}
+
 void setup() {
   pinMode(16, OUTPUT);
   digitalWrite(16, LOW);
   delay(50);
   digitalWrite(16, HIGH);
+
+  pinMode(PIN_LED_R, OUTPUT);
 
   Serial.begin(115200);
   Serial.println();
@@ -289,7 +307,7 @@ void setup() {
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  Serial.println("BLE server created...");
+  // Serial.println("BLE server created...");
   display.clear();
   display.drawStringMaxWidth(64, 22, 128, "BLE server created...");
   display.display();
@@ -310,7 +328,7 @@ void setup() {
 
   pServer->getAdvertising()->start();
 
-  Serial.println("Advertising started...");
+  // Serial.println("Advertising started...");
   display.clear();
   display.drawStringMaxWidth(64, 22, 128, "Advertising started...");
   display.display();
@@ -344,7 +362,9 @@ void loop() {
     buffer.push(measurement);
   }
 
-  printCurrentState();
+  drawScreen(buffer.last(), state);
+
+  // printCurrentState();
 
   timeSinceStart++;
   if (timeSinceStart >= 3600) {
@@ -378,7 +398,6 @@ void loop() {
         securityAction = atoi((char *)securityActionCharacteristic->getValue().c_str());
         switch (securityAction) {
           case INVALID_SEC: 
-            Serial.println("auth -1");
             checkNum = getRandomNumber() % DH_COMMON_P;
             sprintf(message, "%d", checkNum);
             securityValueCharacteristic->setValue(message);            
@@ -386,10 +405,8 @@ void loop() {
             checkNum += shared_key;
             break;
           case AUTH_0: 
-            Serial.println("auth 2");
             break;
           case AUTH_1: 
-            Serial.println("auth 3");
             if (atoi((char *)securityValueCharacteristic->getData()) == checkNum) {
               clientAuthenticated = 1;
             }
@@ -404,16 +421,13 @@ void loop() {
       securityAction = atoi((char *)securityActionCharacteristic->getValue().c_str());
       switch (securityAction) {
         case INVALID_SEC: 
-          Serial.println("pair -1");
           sprintf(message, "%d", server_public_key);
           securityValueCharacteristic->setValue(message);
           securityActionCharacteristic->setValue(PAIR_0_STR);
           break;
         case PAIR_0: 
-          Serial.println("pair 0");
           break;
         case PAIR_1: 
-          Serial.println("pair 1");
           client_public_key = atoi((char *)securityValueCharacteristic->getData());
           shared_key = ((int)pow(client_public_key, private_key)) % DH_COMMON_P;
           for (int i = 0; i < 4; ++i) {
