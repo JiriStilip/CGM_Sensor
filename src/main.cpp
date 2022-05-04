@@ -17,16 +17,16 @@
 #define DH_COMMON_G 2
 #define DH_COMMON_P 19
 
-#define INVALID_SEC 8
-#define INVALID_SEC_STR "8"
-#define PAIR_0 0
-#define PAIR_0_STR "0"
-#define PAIR_1 1
-#define PAIR_1_STR "1"
-#define AUTH_0 2
-#define AUTH_0_STR "2"
-#define AUTH_1 3
-#define AUTH_1_STR "3"
+#define _INVALID_SEC 8
+#define _INVALID_SEC_STR "8"
+#define _PAIR_0 0
+#define _PAIR_0_STR "0"
+#define _PAIR_1 1
+#define _PAIR_1_STR "1"
+#define _AUTH_0 2
+#define _AUTH_0_STR "2"
+#define _AUTH_1 3
+#define _AUTH_1_STR "3"
 
 #define PIN_OLED_SDA 4
 #define PIN_OLED_SCL 15
@@ -36,16 +36,23 @@
 
 #define PATIENT 1
 
-
+// objekt integrovaneho displeje
 SSD1306  display(0x3c, PIN_OLED_SDA, PIN_OLED_SCL);
 
-
+// datova struktura mereni a buffer k jejich ukladani
 struct CGMeasurement {
   int32_t timeOffset;
   int32_t glucoseValue;
 };
 
+CircularBuffer<CGMeasurement, 10> buffer;
 
+// stavy relace a podstavy pro sluzbu zabezpeceni
+enum State {INIT, SECURITY, READ, NOTIFY};
+enum SecurityState {PAIR_0, PAIR_1, AUTH_0, AUTH_1, READY};
+
+
+// BLE server, sluzby a jejich charakteristiky
 BLEServer *cgmServer;
 
 BLEService *cgmService;
@@ -56,29 +63,32 @@ BLEService *securityService;
 BLECharacteristic *securityValueCharacteristic;
 BLECharacteristic *securityActionCharacteristic;
 
-
+// klice a hodnoty pro parovani, autentizaci a sifrovani
 uint32_t private_key;
 uint32_t server_public_key;
 uint32_t client_public_key;
 uint32_t shared_key = 0;
 uint32_t aes_key[4] = { 0 };
+uint32_t checkNum;
 
-int32_t clientLastTime = -1;
-
+// promenne potenciometru k nastaveni intervalu mereni
 int pot_0;
-
 int cgm_interval = DEFAULT_CGM_INTERVAL;
+
+// cas behu zarizeni
 int timeSinceStart = 0;
 
-CircularBuffer<CGMeasurement, 10> buffer;
-
+// promenne pro stav relace
+State state = INIT;
+SecurityState securityState = PAIR_0;
 bool clientConnected = false;
 bool clientPaired = false;
 bool clientAuthenticated = false;
 static char state[8];
 int securityAction = INVALID_SEC;
-uint32_t checkNum;
+int32_t clientLastTime = -1;
 
+// callback funkce serveru
 class CGMServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       digitalWrite(PIN_LED_R, HIGH);
@@ -96,6 +106,13 @@ class CGMServerCallbacks: public BLEServerCallbacks {
     }
 };
 
+/**
+ * @brief funkce nastavujici hodnotu charakteristiky mereni nasledujici po zadanem case
+ * 
+ * @param clientLastTime cas posledniho mereni, ktere ma klient k dispozici
+ * @return true nasledujici mereni je k dispozici a bylo nastaveno
+ * @return false zadne nasledujici mereni neni k dispozici
+ */
 bool setValueAfter(int clientLastTime) {
   char measurementMessage[32];
 
@@ -110,6 +127,12 @@ bool setValueAfter(int clientLastTime) {
   return false;
 }
 
+/**
+ * @brief funkce vykreslujici hlavni obrazovku
+ * 
+ * @param measurement struktura mereni k zobrazeni na displeji
+ * @param message zprava k zobrazeni v informacni casti displeje
+ */
 void drawScreen(CGMeasurement measurement, char *message) {
   char screenBuffer[64];
 
