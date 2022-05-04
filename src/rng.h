@@ -12,4 +12,6 @@
 
 uint32_t random_uint32();
 
+int random_from_to(int min, int max);
+
 #endif

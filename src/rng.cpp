@@ -5,3 +5,7 @@ uint32_t random_uint32() {
 
   return *rng_data_reg;
 }
+
+int random_from_to(int min, int max) {
+  return (min + (abs((int)random_uint32()) % (max - min + 1)));
+}

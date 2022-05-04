@@ -8,9 +8,7 @@
 #include "rng.h"
 #include "uuid.h"
 
-SSD1306  display(0x3c, 4, 15);
-
-#define BLE_SERVER_NAME "CGM Sensor"
+#define SENSOR_BLE_NAME "CGM Sensor"
 
 #define DEFAULT_CGM_INTERVAL 5
 
@@ -30,26 +28,34 @@ SSD1306  display(0x3c, 4, 15);
 #define AUTH_1 3
 #define AUTH_1_STR "3"
 
+#define PIN_OLED_SDA 4
+#define PIN_OLED_SCL 15
+#define PIN_OLED_RST 16
 #define PIN_LED_R 23
 #define PIN_POT_0 13
 
-#define PATIENT 0
+#define PATIENT 1
+
+
+SSD1306  display(0x3c, PIN_OLED_SDA, PIN_OLED_SCL);
 
 
 struct CGMeasurement {
   int32_t timeOffset;
-  float glucoseValue;
+  int32_t glucoseValue;
 };
 
-float generateValue() {
-  float val = sin(millis());
-  if (val < 0) {
-    val += 1.0;
-  }
-  val = (val + 5.0) * 18.02;
 
-  return val;
-}
+BLEServer *cgmServer;
+
+BLEService *cgmService;
+BLECharacteristic *cgmMeasurementCharacteristic;
+BLECharacteristic *cgmTimeCharacteristic;
+
+BLEService *securityService;
+BLECharacteristic *securityValueCharacteristic;
+BLECharacteristic *securityActionCharacteristic;
+
 
 uint32_t private_key;
 uint32_t server_public_key;
@@ -57,11 +63,12 @@ uint32_t client_public_key;
 uint32_t shared_key = 0;
 uint32_t aes_key[4] = { 0 };
 
+int32_t clientLastTime = -1;
+
 int pot_0;
 
 int cgm_interval = DEFAULT_CGM_INTERVAL;
 int timeSinceStart = 0;
-int clientLastTime = -1;
 
 CircularBuffer<CGMeasurement, 10> buffer;
 
@@ -72,21 +79,13 @@ static char state[8];
 int securityAction = INVALID_SEC;
 uint32_t checkNum;
 
-BLECharacteristic *cgmMeasurementCharacteristic = new BLECharacteristic(CGM_MEASUREMENT_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
-BLECharacteristic *cgmTimeCharacteristic = new BLECharacteristic(CGM_TIME_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
-
-BLECharacteristic *securityValueCharacteristic = new BLECharacteristic(CGM_SECURITY_VALUE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
-BLECharacteristic *securityActionCharacteristic = new BLECharacteristic(CGM_SECURITY_ACTION_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ);
-
-class MyServerCallbacks: public BLEServerCallbacks {
+class CGMServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
-      // Serial.println("\nCONNECTED.");
       digitalWrite(PIN_LED_R, HIGH);
       clientConnected = true;
     }
 
     void onDisconnect(BLEServer* pServer) {
-      // Serial.println("\nDISCONNECTED.");
       digitalWrite(PIN_LED_R, LOW);
       clientConnected = false;
       clientAuthenticated = false;
@@ -94,83 +93,51 @@ class MyServerCallbacks: public BLEServerCallbacks {
       clientLastTime = -1;
       sprintf(state, "%s", "INIT");
       pServer->getAdvertising()->start();
-      // Serial.println("Advertising started...");
     }
 };
 
 bool setValueAfter(int clientLastTime) {
-  char measurementMessage[12];
+  char measurementMessage[32];
 
   for (int i = 0; i < buffer.size(); ++i) {
     if (clientLastTime >= buffer[i].timeOffset) {
       continue;
     }
-    sprintf(measurementMessage, "%04d|%6.2f", buffer[i].timeOffset, buffer[i].glucoseValue);
+    sprintf(measurementMessage, "%10d|%4d", buffer[i].timeOffset, buffer[i].glucoseValue);
     cgmMeasurementCharacteristic->setValue(measurementMessage);
     return true;
   }
   return false;
 }
 
-void printCurrentState() {
-  char printBuffer[32];
-
-  Serial.println();
-  Serial.print("Current state: ");
-  Serial.println(state);
-  Serial.print("Time since start: ");
-  Serial.println(timeSinceStart);
-  Serial.print("Client last time: ");
-  Serial.println(clientLastTime);
-  Serial.print("Security action: ");
-  Serial.println(securityAction);
-  Serial.print("Client connected: ");
-  Serial.println(clientConnected);
-  Serial.print("Client paired: ");
-  Serial.println(clientPaired);
-  Serial.print("Client authenticated: ");
-  Serial.println(clientAuthenticated);
-  Serial.print("Shared key: ");
-  Serial.println(shared_key);
-  Serial.print("AES key: ");
-  for (int i = 0; i < 4; ++i) {
-    Serial.print(aes_key[i]);
-  }
-  Serial.println();
-  Serial.print("Current CGM value: ");
-  sprintf(printBuffer, "%04d|%6.2f", buffer.last().timeOffset, buffer.last().glucoseValue);
-  Serial.println(printBuffer);
-
-  Serial.println("Buffer (time | mg/dL):");
-  for (int i = 0; i < buffer.size(); ++i) {
-    sprintf(printBuffer, "%02d:%02d | %6.2f", (buffer[i].timeOffset / 60), (buffer[i].timeOffset % 60), buffer[i].glucoseValue);
-    Serial.println(printBuffer);
-  }
-}
-
 void drawScreen(CGMeasurement measurement, char *message) {
-  char printBuffer[128];
-
-  sprintf(printBuffer, "%04d|%6.2f", measurement.timeOffset, measurement.glucoseValue);
+  char screenBuffer[64];
 
   display.clear();
   display.setFont(ArialMT_Plain_16);
-  display.drawString(64, 8, printBuffer);
-  display.drawHorizontalLine(0, 40, 128);
-  display.setFont(ArialMT_Plain_10);
-  display.drawStringMaxWidth(64, 42, 128, message);
 
-  sprintf(printBuffer, "CGM interval set to: %d s", cgm_interval);
-  display.drawStringMaxWidth(64, 54, 128, printBuffer);
+  sprintf(screenBuffer, "%d", measurement.timeOffset);
+  display.drawString(64, 1, screenBuffer);
+
+  sprintf(screenBuffer, "%.2f", (measurement.glucoseValue / 100.0));
+  display.drawString(64, 19, screenBuffer);
+
+  display.drawHorizontalLine(0, 38, 128);
+  display.setFont(ArialMT_Plain_10);
+
+  display.drawStringMaxWidth(64, 40, 128, message);
+
+  sprintf(screenBuffer, "CGM interval (1 - 10): %d", cgm_interval);
+  display.drawStringMaxWidth(64, 52, 128, screenBuffer);
 
   display.display();
 }
 
 void setup() {
-  pinMode(16, OUTPUT);
-  digitalWrite(16, LOW);
+  pinMode(PIN_OLED_RST, OUTPUT);
+  digitalWrite(PIN_OLED_RST, LOW);
   delay(50);
-  digitalWrite(16, HIGH);
+  digitalWrite(PIN_OLED_RST, HIGH);
 
   pinMode(PIN_LED_R, OUTPUT);
   pinMode(PIN_POT_0, INPUT);
@@ -183,44 +150,44 @@ void setup() {
   display.setFont(ArialMT_Plain_10);
   display.setTextAlignment(TEXT_ALIGN_CENTER);
 
-  BLEDevice::init(BLE_SERVER_NAME);
-
-  BLEServer *pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-
-  // Serial.println("BLE server created...");
   display.clear();
-  display.drawStringMaxWidth(64, 22, 128, "BLE server created...");
+  display.drawStringMaxWidth(64, 22, 128, "Setting up...");
   display.display();
   delay(1500);
 
-  BLEService *securityService = pServer->createService(CGM_SECURITY_SERVICE_UUID);
-  securityService->addCharacteristic(securityValueCharacteristic);
-  securityService->addCharacteristic(securityActionCharacteristic);
-  securityActionCharacteristic->setValue(INVALID_SEC_STR);
-  securityService->start();
+  BLEDevice::init(SENSOR_BLE_NAME);
 
-  BLEService *cgmService = pServer->createService(CGM_SERVICE_UUID);
+  cgmServer = BLEDevice::createServer();
+  cgmServer->setCallbacks(new CGMServerCallbacks());
+
+  cgmService = cgmServer->createService(CGM_SERVICE_UUID);
+
+  cgmMeasurementCharacteristic = new BLECharacteristic(CGM_MEASUREMENT_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
+  cgmMeasurementCharacteristic->addDescriptor(new BLE2902());
+  cgmTimeCharacteristic = new BLECharacteristic(CGM_TIME_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
+  cgmTimeCharacteristic->setValue(INVALID_TIME);
+
   cgmService->addCharacteristic(cgmMeasurementCharacteristic);
   cgmService->addCharacteristic(cgmTimeCharacteristic);
-  cgmMeasurementCharacteristic->addDescriptor(new BLE2902());
-  cgmTimeCharacteristic->setValue(INVALID_TIME);
   cgmService->start();
 
-  pServer->getAdvertising()->start();
+  securityService = cgmServer->createService(CGM_SECURITY_SERVICE_UUID);
 
-  // Serial.println("Advertising started...");
+  securityValueCharacteristic = new BLECharacteristic(CGM_SECURITY_VALUE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  securityActionCharacteristic = new BLECharacteristic(CGM_SECURITY_ACTION_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ);
+  securityActionCharacteristic->setValue(INVALID_SEC_STR);
+
+  securityService->addCharacteristic(securityValueCharacteristic);
+  securityService->addCharacteristic(securityActionCharacteristic);
+  securityService->start();
+
+  cgmServer->getAdvertising()->start();
+
   display.clear();
   display.drawStringMaxWidth(64, 22, 128, "Advertising started...");
   display.display();
   delay(1500);
-/*
-  Serial.println("Awaiting a client connection to notify...");
-  display.clear();
-  display.drawStringMaxWidth(64, 22, 128, "Awaiting a client connection to notify...");
-  display.display();
-  delay(1500);
-*/
+
   display.setFont(ArialMT_Plain_16);
 
   // generate random key
@@ -242,32 +209,27 @@ void loop() {
   if (timeSinceStart % cgm_interval == 0) {
     if (PATIENT) {
       String received;
-      int time = 0;
-      int val = 0;
+      int32_t time = 0;
+      int32_t val = 0;
 
       Serial.println("STEP");
-      received = Serial.readString();
-      sscanf(received.c_str(), "OK;%d", &time);
+      do {
+        received = Serial.readStringUntil('\n');
+        sscanf(received.c_str(), "OK;%d", &time);
+      } while (time == 0);
 
       Serial.println("GET_IG");
-      received = Serial.readString();
+      received = Serial.readStringUntil('\n');
       sscanf(received.c_str(), "OK;%d", &val);
 
-      buffer.push(CGMeasurement{((time % 86400) / 60), (float)(val / 100.00)});
+      buffer.push(CGMeasurement{time, val});
     }
     else {
-      buffer.push(CGMeasurement{timeSinceStart, generateValue()});
+      buffer.push(CGMeasurement{timeSinceStart, random_from_to(750, 1500)});
     }   
   }
 
   drawScreen(buffer.last(), state);
-
-  // printCurrentState();
-
-  timeSinceStart++;
-  if (timeSinceStart >= 3600) {
-    timeSinceStart = 0;
-  }
 
   char message[17];
 
@@ -286,7 +248,7 @@ void loop() {
         else {
           // stav READ
           sprintf(state, "%s", "READ");
-          sprintf(message, "%04d|%6.2f", buffer.first().timeOffset, buffer.first().glucoseValue);
+          sprintf(message, "%10d|%4d", buffer.first().timeOffset, buffer.first().glucoseValue);
           cgmMeasurementCharacteristic->setValue(message);
         }
       }
@@ -338,6 +300,6 @@ void loop() {
     }
   }
 
-
+  timeSinceStart++;
   delay(1000);
 }
