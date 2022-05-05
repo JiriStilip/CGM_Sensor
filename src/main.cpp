@@ -18,24 +18,13 @@
 #define DH_COMMON_G 2
 #define DH_COMMON_P 19
 
-#define _INVALID_SEC 8
-#define _INVALID_SEC_STR "8"
-#define _PAIR_0 0
-#define _PAIR_0_STR "0"
-#define _PAIR_1 1
-#define _PAIR_1_STR "1"
-#define _AUTH_0 2
-#define _AUTH_0_STR "2"
-#define _AUTH_1 3
-#define _AUTH_1_STR "3"
-
 #define PIN_OLED_SDA 4
 #define PIN_OLED_SCL 15
 #define PIN_OLED_RST 16
 #define PIN_LED_R 23
 #define PIN_POT_0 13
 
-#define PATIENT 0
+#define PATIENT 1
 
 // objekt integrovaneho displeje
 SSD1306  display(0x3c, PIN_OLED_SDA, PIN_OLED_SCL);
@@ -233,7 +222,7 @@ void setup() {
   display.display();
   delay(1500);
 
-  private_key = 5;
+  private_key = random_from_to(1, 100);
   server_public_key = ((int)pow(DH_COMMON_G, private_key)) % DH_COMMON_P;
 
   BLEDevice::init(SENSOR_BLE_NAME);
