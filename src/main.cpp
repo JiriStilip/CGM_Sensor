@@ -12,7 +12,8 @@
 
 #define DEFAULT_CGM_INTERVAL 5
 
-#define INVALID_TIME "-1"
+#define INVALID_TIME -1
+#define INVALID_TIME_STR "-1"
 
 #define DH_COMMON_G 2
 #define DH_COMMON_P 19
@@ -34,7 +35,7 @@
 #define PIN_LED_R 23
 #define PIN_POT_0 13
 
-#define PATIENT 1
+#define PATIENT 0
 
 // objekt integrovaneho displeje
 SSD1306  display(0x3c, PIN_OLED_SDA, PIN_OLED_SCL);
@@ -49,7 +50,22 @@ CircularBuffer<CGMeasurement, 10> buffer;
 
 // stavy relace a podstavy pro sluzbu zabezpeceni
 enum State {INIT, SECURITY, READ, NOTIFY};
+char *stateStrings[4] = {"INIT", "SECURITY", "READ", "NOTIFY"};
 enum SecurityState {PAIR_0, PAIR_1, AUTH_0, AUTH_1, READY};
+char *securityStateStrings[5] = {"PAIR", "PAIR", "AUTH", "AUTH", "READY"};
+char *securityStateValueStrings[5] = {"0", "1", "2", "3", "4"};
+
+State state = INIT;
+SecurityState securityState = PAIR_0;
+
+char *getStateStr() {
+    if (state == SECURITY) {
+        return securityStateStrings[static_cast<int>(securityState)];
+    }
+    else {
+        return stateStrings[static_cast<int>(state)];
+    }
+}
 
 
 // BLE server, sluzby a jejich charakteristiky
@@ -63,6 +79,8 @@ BLEService *securityService;
 BLECharacteristic *securityValueCharacteristic;
 BLECharacteristic *securityActionCharacteristic;
 
+char messageBuffer[64];
+
 // klice a hodnoty pro parovani, autentizaci a sifrovani
 uint32_t private_key;
 uint32_t server_public_key;
@@ -75,33 +93,38 @@ uint32_t checkNum;
 int pot_0;
 int cgm_interval = DEFAULT_CGM_INTERVAL;
 
-// cas behu zarizeni
+// cas behu zarizeni a posledniho mereni klienta
 int timeSinceStart = 0;
-
-// promenne pro stav relace
-State state = INIT;
-SecurityState securityState = PAIR_0;
-bool clientConnected = false;
-bool clientPaired = false;
-bool clientAuthenticated = false;
-static char state[8];
-int securityAction = INVALID_SEC;
 int32_t clientLastTime = -1;
+
+/**
+ * @brief funkce k vystaveni nahodne zpravy ve stavu AUTH_0
+ * 
+ */
+void setAuthValue() {
+  checkNum = random_from_to(1, 100);
+  sprintf(messageBuffer, "%d", checkNum);
+  securityValueCharacteristic->setValue(messageBuffer);
+  securityActionCharacteristic->setValue(securityStateValueStrings[static_cast<int>(AUTH_0)]);
+  checkNum += shared_key;
+}
 
 // callback funkce serveru
 class CGMServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       digitalWrite(PIN_LED_R, HIGH);
-      clientConnected = true;
+      state = SECURITY;
+      if (shared_key != 0) {
+        securityState = AUTH_0;
+        setAuthValue();
+      }
     }
 
     void onDisconnect(BLEServer* pServer) {
       digitalWrite(PIN_LED_R, LOW);
-      clientConnected = false;
-      clientAuthenticated = false;
-      cgmTimeCharacteristic->setValue(INVALID_TIME);
-      clientLastTime = -1;
-      sprintf(state, "%s", "INIT");
+      state = INIT;
+      cgmTimeCharacteristic->setValue(INVALID_TIME_STR);
+      clientLastTime = INVALID_TIME;
       pServer->getAdvertising()->start();
     }
 };
@@ -114,17 +137,49 @@ class CGMServerCallbacks: public BLEServerCallbacks {
  * @return false zadne nasledujici mereni neni k dispozici
  */
 bool setValueAfter(int clientLastTime) {
-  char measurementMessage[32];
-
   for (int i = 0; i < buffer.size(); ++i) {
     if (clientLastTime >= buffer[i].timeOffset) {
       continue;
     }
-    sprintf(measurementMessage, "%10d|%4d", buffer[i].timeOffset, buffer[i].glucoseValue);
-    cgmMeasurementCharacteristic->setValue(measurementMessage);
+    sprintf(messageBuffer, "%10d|%4d", buffer[i].timeOffset, buffer[i].glucoseValue);
+    cgmMeasurementCharacteristic->setValue(messageBuffer);
     return true;
   }
   return false;
+}
+
+void processSecurity() {
+  securityState = static_cast<SecurityState>(atoi(securityActionCharacteristic->getValue().c_str()));
+
+  switch (securityState) {
+    case PAIR_0: 
+      break;
+    
+    case PAIR_1: 
+      client_public_key = atoi(securityValueCharacteristic->getValue().c_str());
+      shared_key = ((int)pow(client_public_key, private_key)) % DH_COMMON_P;
+      for (int i = 0; i < 4; ++i) {
+        aes_key[i] = shared_key;
+      }
+      securityState = AUTH_0;
+      setAuthValue();
+      break;
+
+    case AUTH_0: 
+      break;
+
+    case AUTH_1: 
+      if (atoi(securityValueCharacteristic->getValue().c_str()) == checkNum) {
+        securityState = READY;
+        securityActionCharacteristic->setValue(securityStateValueStrings[static_cast<int>(READY)]);
+        state = READ;
+        setValueAfter(clientLastTime);
+      }
+      break;
+
+    case READY: 
+      break;
+  }
 }
 
 /**
@@ -178,6 +233,9 @@ void setup() {
   display.display();
   delay(1500);
 
+  private_key = 5;
+  server_public_key = ((int)pow(DH_COMMON_G, private_key)) % DH_COMMON_P;
+
   BLEDevice::init(SENSOR_BLE_NAME);
 
   cgmServer = BLEDevice::createServer();
@@ -188,7 +246,7 @@ void setup() {
   cgmMeasurementCharacteristic = new BLECharacteristic(CGM_MEASUREMENT_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   cgmMeasurementCharacteristic->addDescriptor(new BLE2902());
   cgmTimeCharacteristic = new BLECharacteristic(CGM_TIME_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE);
-  cgmTimeCharacteristic->setValue(INVALID_TIME);
+  cgmTimeCharacteristic->setValue(INVALID_TIME_STR);
 
   cgmService->addCharacteristic(cgmMeasurementCharacteristic);
   cgmService->addCharacteristic(cgmTimeCharacteristic);
@@ -197,8 +255,10 @@ void setup() {
   securityService = cgmServer->createService(CGM_SECURITY_SERVICE_UUID);
 
   securityValueCharacteristic = new BLECharacteristic(CGM_SECURITY_VALUE_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  sprintf(messageBuffer, "%d", server_public_key);
+  securityValueCharacteristic->setValue(messageBuffer);
   securityActionCharacteristic = new BLECharacteristic(CGM_SECURITY_ACTION_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_READ);
-  securityActionCharacteristic->setValue(INVALID_SEC_STR);
+  securityActionCharacteristic->setValue(securityStateValueStrings[static_cast<int>(securityState)]);
 
   securityService->addCharacteristic(securityValueCharacteristic);
   securityService->addCharacteristic(securityActionCharacteristic);
@@ -210,19 +270,6 @@ void setup() {
   display.drawStringMaxWidth(64, 22, 128, "Advertising started...");
   display.display();
   delay(1500);
-
-  display.setFont(ArialMT_Plain_16);
-
-  // generate random key
-/*
-  for (int i = 0; i < 4; ++i) {
-    aes_key[i] = getRandomNumber();
-  }
-*/
- 
-  private_key = 5;
-  server_public_key = ((int)pow(DH_COMMON_G, private_key)) % DH_COMMON_P;
-  sprintf(state, "%s", "INIT");
 }
 
 void loop() {
@@ -252,75 +299,36 @@ void loop() {
     }   
   }
 
-  drawScreen(buffer.last(), state);
+  drawScreen(buffer.last(), getStateStr());
 
-  char message[17];
-
-  if (clientConnected) {
-    if (clientPaired) {
-      if (clientAuthenticated) {
-        clientLastTime = atoi((char *)cgmTimeCharacteristic->getValue().c_str());
-        if (clientLastTime >= 0) {
-          // stav NOTIFY
-          sprintf(state, "%s", "NOTIFY");
-          if (setValueAfter(clientLastTime)) {
-            cgmTimeCharacteristic->setValue(INVALID_TIME);
-            cgmMeasurementCharacteristic->notify();
-          }
-        }
-        else {
-          // stav READ
-          sprintf(state, "%s", "READ");
-          sprintf(message, "%10d|%4d", buffer.first().timeOffset, buffer.first().glucoseValue);
-          cgmMeasurementCharacteristic->setValue(message);
-        }
-      }
-      else {
-        // stav AUTH
-        sprintf(state, "%s", "AUTH");
-        securityAction = atoi((char *)securityActionCharacteristic->getValue().c_str());
-        switch (securityAction) {
-          case INVALID_SEC: 
-            checkNum = random_uint32() % DH_COMMON_P;
-            sprintf(message, "%d", checkNum);
-            securityValueCharacteristic->setValue(message);            
-            securityActionCharacteristic->setValue(AUTH_0_STR);
-            checkNum += shared_key;
-            break;
-          case AUTH_0: 
-            break;
-          case AUTH_1: 
-            if (atoi((char *)securityValueCharacteristic->getData()) == checkNum) {
-              clientAuthenticated = 1;
-            }
-            securityActionCharacteristic->setValue(INVALID_SEC_STR);
-            break;
-        }
-      }
+  if (securityState == READY) {
+    clientLastTime = atoi(cgmTimeCharacteristic->getValue().c_str());
+    if (clientLastTime == INVALID_TIME) {
+      state = READ;
     }
     else {
-      // stav PAIR
-      sprintf(state, "%s", "PAIR");
-      securityAction = atoi((char *)securityActionCharacteristic->getValue().c_str());
-      switch (securityAction) {
-        case INVALID_SEC: 
-          sprintf(message, "%d", server_public_key);
-          securityValueCharacteristic->setValue(message);
-          securityActionCharacteristic->setValue(PAIR_0_STR);
-          break;
-        case PAIR_0: 
-          break;
-        case PAIR_1: 
-          client_public_key = atoi((char *)securityValueCharacteristic->getData());
-          shared_key = ((int)pow(client_public_key, private_key)) % DH_COMMON_P;
-          for (int i = 0; i < 4; ++i) {
-            aes_key[i] = shared_key;
-          }
-          securityActionCharacteristic->setValue(INVALID_SEC_STR);
-          clientPaired = 1;
-          break;
-      }
+      state = NOTIFY;
     }
+  }
+
+  switch (state) {
+    case INIT: 
+      break;
+  
+    case SECURITY: 
+      processSecurity();
+      break;
+
+    case READ: 
+      setValueAfter(clientLastTime);
+      break;
+
+    case NOTIFY: 
+      if (setValueAfter(clientLastTime)) {
+        cgmTimeCharacteristic->setValue(INVALID_TIME_STR);
+        cgmMeasurementCharacteristic->notify();
+      }
+      break;
   }
 
   timeSinceStart++;
